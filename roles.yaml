@@ -1,0 +1,75 @@
+# AccessOps role catalog ("access as code").
+#
+# Every role describes exactly what a person gets in each system.
+# The file is validated by a Pydantic schema on load (accessops/catalog.py):
+# unknown fields, typos and unsafe combinations fail with a clear error.
+#
+# Admin-level rights (postgres schema_create, TRUNCATE/REFERENCES/TRIGGER,
+# rabbitmq configure, linux sudo or groups like sudo/docker) are only allowed
+# in roles marked `privileged: true`.
+# Privileged roles can only be granted with a human approver (--approved-by)
+# and only temporarily: --ttl is required and limited to 24h.
+# max_ttl (optional, e.g. 8h, 7d): the longest access a role may get; grants then need --ttl.
+
+version: 1
+
+# Where access is granted.
+targets:
+  postgres:
+    database: appdb
+    schema: app
+  rabbitmq:
+    vhost: app
+
+roles:
+  developer:
+    description: Builds features. Reads and writes application data.
+    privileged: false
+    postgres:
+      table_privileges: [SELECT, INSERT, UPDATE, DELETE]
+    rabbitmq:
+      configure: ""
+      write: ".*"
+      read: ".*"
+    linux:
+      groups: [developers]
+
+  analyst:
+    description: Builds reports. Read-only access to data and queues.
+    privileged: false
+    postgres:
+      table_privileges: [SELECT]
+    rabbitmq:
+      configure: ""
+      write: ""
+      read: ".*"
+    linux:
+      groups: [analysts]
+
+  qa:
+    description: Tests the application. Reads, inserts and updates test data; no deletes.
+    privileged: false
+    postgres:
+      table_privileges: [SELECT, INSERT, UPDATE]
+    rabbitmq:
+      configure: ""
+      write: ".*"
+      read: ".*"
+    linux:
+      groups: [qa]
+    max_ttl: 7d
+
+  devops_admin:
+    description: Operates the platform. Full control of the app schema and vhost.
+    privileged: true
+    postgres:
+      table_privileges: [SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER]
+      schema_create: true
+    rabbitmq:
+      configure: ".*"
+      write: ".*"
+      read: ".*"
+    linux:
+      groups: [devops, developers]
+      sudo: true
+    max_ttl: 12h

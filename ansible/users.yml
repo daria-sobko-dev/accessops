@@ -1,0 +1,23 @@
+# Manage Linux user access on linux-target. Called by AccessOps (accessops/linux.py).
+#
+# Extra vars:
+#   access_action: grant | revoke | list
+#   subject:       user name (grant, revoke)
+#   role_name, linux_groups, sudo, public_key: (grant) taken from the validated roles.yaml
+- name: AccessOps Linux user management
+  hosts: linux_target
+  become: true
+  gather_facts: false
+  vars:
+    marker: accessops-managed
+    sudoers_file: "/etc/sudoers.d/accessops-{{ subject | default('none') }}"
+  tasks:
+    - name: Validate input
+      ansible.builtin.assert:
+        that:
+          - access_action in ['grant', 'revoke', 'list']
+          - access_action == 'list' or subject is match('^[a-z][a-z0-9_]{1,31}$')
+        quiet: true
+
+    - name: Run the requested action
+      ansible.builtin.include_tasks: "tasks/{{ access_action }}.yml"

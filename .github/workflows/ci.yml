@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Read-only token: CI never needs to write to the repository.
+permissions:
+  contents: read
+
+# A new push to the same branch cancels the older, now pointless run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITLEAKS_VERSION: "8.30.1"
+
+jobs:
+  lint-and-unit:
+    name: Ruff and unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python .github/scripts/requirements.py > /tmp/requirements.txt
+          pip install -r /tmp/requirements.txt
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Ruff (format)
+        run: ruff format --check .
+
+      - name: Unit tests (no Docker needed)
+        run: pytest -q
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # whole history: a secret removed later still counts
+
+      - name: Install gitleaks
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "/tmp/$file" "$base/$file"
+          curl -sSfL -o /tmp/checksums.txt "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          (cd /tmp && grep " $file\$" checksums.txt | sha256sum --check --strict)
+          tar -xzf "/tmp/$file" -C /tmp gitleaks
+
+      - name: Scan the whole git history
+        # --redact: even if something is found, the log shows where, never the value.
+        run: /tmp/gitleaks git . --redact --no-banner --verbose
+
+  integration:
+    name: Integration tests (docker compose)
+    runs-on: ubuntu-24.04
+    needs: lint-and-unit
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python .github/scripts/requirements.py > /tmp/requirements.txt
+          pip install -r /tmp/requirements.txt
+
+      - name: Create a throwaway .env (random values, masked in logs)
+        run: python .github/scripts/make_test_env.py
+
+      - name: Create SSH keys and the API token for this run
+        run: |
+          python -m accessops ssh-bootstrap
+          python -m accessops api-bootstrap
+
+      - name: Start Postgres, RabbitMQ, linux-target and accessops-api
+        run: docker compose up -d --build --wait --wait-timeout 300 postgres rabbitmq linux-target accessops-api
+
+      - name: Initialise AccessOps (databases, roles, vhost, audit, grants)
+        run: python -m accessops init
+
+      - name: Integration tests
+        run: pytest -m integration -q
+
+      - name: accessops-api answers 401 without a token and works with it
+        run: |
+          docker compose exec -T accessops-api python - <<'EOF'
+          import os, urllib.request, urllib.error
+
+          def status(path, method, token=None):
+              request = urllib.request.Request(f"http://127.0.0.1:8000{path}", method=method)
+              if token:
+                  request.add_header("Authorization", f"Bearer {token}")
+              try:
+                  return urllib.request.urlopen(request, timeout=120).status
+              except urllib.error.HTTPError as error:
+                  return error.code
+
+          token = os.environ["ACCESSOPS_API_TOKEN"]
+          checks = {
+              "POST /cleanup without token": (status("/cleanup", "POST"), 401),
+              "GET /drift with a wrong token": (status("/drift", "GET", "wrong"), 401),
+              "GET /drift with the token": (status("/drift", "GET", token), 200),
+          }
+          for name, (got, expected) in checks.items():
+              print(f"{name}: HTTP {got} (expected {expected})")
+          assert all(got == expected for got, expected in checks.values())
+          EOF
+
+      - name: Container logs (only if something failed)
+        if: failure()
+        run: docker compose logs --tail 100 postgres rabbitmq linux-target accessops-api
+
+      - name: Stop containers and delete their data
+        if: always()
+        run: docker compose down -v

@@ -1,0 +1,308 @@
+[
+  {
+    "id": "AccessOpsCleanup",
+    "name": "AccessOps: cleanup every 5 minutes",
+    "nodes": [
+      {
+        "id": "schedule",
+        "name": "Every 5 minutes",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 5
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "run-cleanup",
+        "name": "Run cleanup",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          220,
+          0
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://accessops-api:8000/cleanup",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "neverError": true
+              }
+            },
+            "timeout": 240000
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "AccessOpsApiCred",
+            "name": "AccessOps API token"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "id": "decide",
+        "name": "Anything wrong?",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          460,
+          0
+        ],
+        "parameters": {
+          "jsCode": "// Decide whether a human must know. No items returned = no message (all is well).\n// Messages go out in Telegram HTML mode: escape <, > and & so any name is shown as is.\nconst html = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst tz = 'Europe/Madrid';\nconst fmt = (iso) => (iso ? DateTime.fromISO(iso).setZone(tz).toFormat(\"yyyy-MM-dd HH:mm 'Madrid'\") : 'never');\nconst now = DateTime.now().setZone(tz).toFormat(\"yyyy-MM-dd HH:mm 'Madrid'\");\nconst res = $input.first().json;\n\nif (res.statusCode === undefined) {\n  // The request itself failed (API down, timeout): arrived through the error output.\n  const reason = res.error?.message ?? JSON.stringify(res).slice(0, 300);\n  return [{ json: { text: html(`🚨 AccessOps cleanup could not run (${now}).\\n${reason}`) } }];\n}\nif (res.statusCode === 409) return []; // another cleanup is still running: nothing wrong\nif (res.statusCode !== 200) {\n  const detail = JSON.stringify(res.body).slice(0, 300);\n  return [{ json: { text: html(`🚨 AccessOps cleanup failed: HTTP ${res.statusCode} (${now}).\\n${detail}`) } }];\n}\nconst errors = res.body.errors ?? [];\nif (errors.length === 0) return [];\nconst lines = errors.map(\n  (e) => `• ${e.subject} in ${e.system} (role ${e.role}, expired ${fmt(e.expires_at)}): ${e.error}`,\n);\nreturn [{\n  json: {\n    text: html(`🚨 AccessOps cleanup: ${errors.length} revoke(s) failed (${now}).\\n` +\n      `This access is still active; the next run (in 5 min) tries again.\\n${lines.join('\\n')}`),\n  },\n}];\n"
+        }
+      },
+      {
+        "id": "telegram",
+        "name": "Send to Telegram",
+        "type": "n8n-nodes-base.telegram",
+        "typeVersion": 1.2,
+        "position": [
+          700,
+          0
+        ],
+        "parameters": {
+          "chatId": "__TELEGRAM_CHAT_ID__",
+          "text": "={{ $json.text }}",
+          "additionalFields": {
+            "appendAttribution": false,
+            "parse_mode": "HTML"
+          }
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "AccessOpsTgCred1",
+            "name": "AccessOps Telegram bot"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Every 5 minutes": {
+        "main": [
+          [
+            {
+              "node": "Run cleanup",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Run cleanup": {
+        "main": [
+          [
+            {
+              "node": "Anything wrong?",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Anything wrong?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Anything wrong?": {
+        "main": [
+          [
+            {
+              "node": "Send to Telegram",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "timezone": "Europe/Madrid",
+      "saveManualExecutions": true
+    }
+  },
+  {
+    "id": "AccessOpsDrift01",
+    "name": "AccessOps: drift check every hour",
+    "nodes": [
+      {
+        "id": "schedule",
+        "name": "Every hour",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours",
+                "hoursInterval": 1
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "manual",
+        "name": "Run now (manual)",
+        "type": "n8n-nodes-base.manualTrigger",
+        "typeVersion": 1,
+        "position": [
+          0,
+          200
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "check-drift",
+        "name": "Check drift",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          220,
+          100
+        ],
+        "parameters": {
+          "method": "GET",
+          "url": "http://accessops-api:8000/drift",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "neverError": true
+              }
+            },
+            "timeout": 240000
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "AccessOpsApiCred",
+            "name": "AccessOps API token"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "id": "decide",
+        "name": "Anything wrong?",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          460,
+          100
+        ],
+        "parameters": {
+          "jsCode": "// Decide whether a human must know. No items returned = no message (all is well).\n// Messages go out in Telegram HTML mode: escape <, > and & so any name is shown as is.\nconst html = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst tz = 'Europe/Madrid';\nconst now = DateTime.now().setZone(tz).toFormat(\"yyyy-MM-dd HH:mm 'Madrid'\");\nconst res = $input.first().json;\n\nif (res.statusCode === undefined) {\n  const reason = res.error?.message ?? JSON.stringify(res).slice(0, 300);\n  return [{ json: { text: html(`🚨 AccessOps drift check could not run (${now}).\\n${reason}`) } }];\n}\nif (res.statusCode !== 200) {\n  const detail = JSON.stringify(res.body).slice(0, 300);\n  return [{ json: { text: html(`🚨 AccessOps drift check failed: HTTP ${res.statusCode} (${now}).\\n${detail}`) } }];\n}\n\nconst out = [];\nconst problems = res.body.problems ?? [];\nif (problems.length > 0) {\n  const describe = (p) => {\n    if (p.category === 'extra') return `has AccessOps role ${p.actual_role} but no grant`;\n    if (p.category === 'missing') return `granted role ${p.expected_role} but the account is missing`;\n    return `role is ${p.actual_role}, grant says ${p.expected_role}`;\n  };\n  const lines = problems.map((p) => `• [${p.category}] ${p.subject} in ${p.system}: ${describe(p)}`);\n  out.push({\n    json: {\n      text: html(`🚨 AccessOps drift: ${problems.length} problem(s) (${now}).\\n${lines.join('\\n')}\\n` +\n        'Details: python -m accessops report drift'),\n    },\n  });\n}\n\n// Accounts not managed by AccessOps: only report CHANGES. The last list is remembered\n// between scheduled runs (n8n saves static data for active workflows, not manual runs).\nconst state = $getWorkflowStaticData('global');\nconst current = (res.body.foreign ?? []).map((f) => `${f.system}:${f.subject}`).sort();\nif (state.foreign === undefined) {\n  state.foreign = current; // first run: remember the list, no message\n} else {\n  const added = current.filter((x) => !state.foreign.includes(x));\n  const removed = state.foreign.filter((x) => !current.includes(x));\n  if (added.length > 0 || removed.length > 0) {\n    const parts = [`ℹ️ AccessOps: accounts outside AccessOps changed (${now}).`];\n    if (added.length > 0) parts.push(`New: ${added.join(', ')}`);\n    if (removed.length > 0) parts.push(`Gone: ${removed.join(', ')}`);\n    parts.push('AccessOps never touches them. If this was expected, nothing to do.');\n    out.push({ json: { text: html(parts.join('\\n')) } });\n  }\n  state.foreign = current;\n}\nreturn out;\n"
+        }
+      },
+      {
+        "id": "telegram",
+        "name": "Send to Telegram",
+        "type": "n8n-nodes-base.telegram",
+        "typeVersion": 1.2,
+        "position": [
+          700,
+          100
+        ],
+        "parameters": {
+          "chatId": "__TELEGRAM_CHAT_ID__",
+          "text": "={{ $json.text }}",
+          "additionalFields": {
+            "appendAttribution": false,
+            "parse_mode": "HTML"
+          }
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "AccessOpsTgCred1",
+            "name": "AccessOps Telegram bot"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Every hour": {
+        "main": [
+          [
+            {
+              "node": "Check drift",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check drift": {
+        "main": [
+          [
+            {
+              "node": "Anything wrong?",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Anything wrong?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Anything wrong?": {
+        "main": [
+          [
+            {
+              "node": "Send to Telegram",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Run now (manual)": {
+        "main": [
+          [
+            {
+              "node": "Check drift",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "timezone": "Europe/Madrid",
+      "saveManualExecutions": true
+    }
+  }
+]

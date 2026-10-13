@@ -1,0 +1,10 @@
+# Build context for accessops-api: send only what the image needs.
+# Whitelist: .env, .credentials/, reports/ and everything else never reach Docker.
+*
+!pyproject.toml
+!accessops/
+!ansible/
+!ansible.cfg
+!roles.yaml
+!docker/accessops-api/
+**/__pycache__

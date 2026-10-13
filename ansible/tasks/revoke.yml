@@ -1,0 +1,35 @@
+- name: Read state
+  ansible.builtin.import_tasks: state.yml
+
+- name: Revoke access
+  when: account is not none
+  block:
+    - name: Lock the password and expire the account
+      ansible.builtin.user:
+        name: "{{ subject }}"
+        password_lock: true
+        expires: 1
+
+    - name: Remove SSH authorized keys
+      ansible.builtin.file:
+        path: "{{ account[4] }}/.ssh/authorized_keys"
+        state: absent
+
+    - name: Remove sudo rule
+      ansible.builtin.file:
+        path: "{{ sudoers_file }}"
+        state: absent
+
+    - name: Terminate active sessions and processes
+      ansible.builtin.command:
+        argv: [pkill, -KILL, -u, "{{ subject }}"]
+      register: pkill_result
+      changed_when: pkill_result.rc == 0
+      failed_when: pkill_result.rc not in [0, 1]
+
+    - name: Delete the user and the home directory
+      ansible.builtin.user:
+        name: "{{ subject }}"
+        state: absent
+        remove: true
+        force: true

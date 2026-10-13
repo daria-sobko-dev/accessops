@@ -1,0 +1,56 @@
+- name: Read state
+  ansible.builtin.import_tasks: state.yml
+
+- name: Refuse a second role
+  ansible.builtin.fail:
+    msg: "'{{ subject }}' already has role '{{ current_role }}' on linux; revoke it first."
+  when: account is not none and current_role != role_name
+
+- name: Ensure role groups exist
+  ansible.builtin.group:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ linux_groups }}"
+
+- name: Create user with role groups
+  ansible.builtin.user:
+    name: "{{ subject }}"
+    comment: "{{ marker }} role={{ role_name }}"
+    shell: /bin/bash
+    create_home: true
+    groups: "{{ linux_groups }}"
+    append: false
+
+- name: Ensure ~/.ssh exists (0700)
+  ansible.builtin.file:
+    path: "/home/{{ subject }}/.ssh"
+    state: directory
+    owner: "{{ subject }}"
+    group: "{{ subject }}"
+    mode: "0700"
+
+- name: Install the SSH public key as the only authorized key (0600)
+  ansible.builtin.copy:
+    content: "{{ public_key }}\n"
+    dest: "/home/{{ subject }}/.ssh/authorized_keys"
+    owner: "{{ subject }}"
+    group: "{{ subject }}"
+    mode: "0600"
+
+- name: Grant sudo through /etc/sudoers.d (checked by visudo first)
+  ansible.builtin.copy:
+    content: |
+      # Managed by AccessOps. Role: {{ role_name }}
+      {{ subject }} ALL=(ALL:ALL) NOPASSWD: ALL
+    dest: "{{ sudoers_file }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when: sudo | bool
+
+- name: Make sure there is no sudo rule (non-privileged role)
+  ansible.builtin.file:
+    path: "{{ sudoers_file }}"
+    state: absent
+  when: not (sudo | bool)

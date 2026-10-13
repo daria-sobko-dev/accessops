@@ -1,0 +1,29 @@
+# Secrets
+.env
+.env.*
+!.env.example
+.credentials/
+*.pem
+*_ed25519
+id_rsa*
+# Reports contain people and their access
+reports/
+*.csv
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local assistant notes
+CLAUDE.md
+.claude/
+
+# OS
+.DS_Store

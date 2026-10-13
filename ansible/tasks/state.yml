@@ -1,0 +1,23 @@
+# Read the current account and refuse to touch accounts AccessOps did not create.
+- name: Read the current account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ subject }}"
+    fail_key: false
+
+- name: Remember the current account
+  ansible.builtin.set_fact:
+    account: "{{ getent_passwd[subject] }}"
+    current_role: >-
+      {{ getent_passwd[subject][3] | regex_replace('^.*role=', '')
+         if getent_passwd[subject] is not none and 'role=' in getent_passwd[subject][3]
+         else '' }}
+
+- name: Refuse to touch accounts not managed by AccessOps
+  ansible.builtin.fail:
+    msg: "Linux user '{{ subject }}' exists but is not managed by AccessOps; refusing to touch it."
+  when: account is not none and not account[3].startswith(marker)
+
+- name: Report previous role
+  ansible.builtin.debug:
+    msg: "{{ current_role }}"

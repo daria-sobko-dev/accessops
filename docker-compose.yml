@@ -1,0 +1,146 @@
+name: accessops
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      # Only reachable from this Mac, not from the local network.
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    ports:
+      # Only reachable from this Mac, not from the local network.
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      TZ: ${GENERIC_TIMEZONE}
+      N8N_SECURE_COOKIE: "false"
+    ports:
+      # Only reachable from this Mac, not from the local network.
+      - "127.0.0.1:${N8N_PORT:-5678}:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  linux-target:
+    build: ./docker/linux-target
+    image: accessops/linux-target:local
+    hostname: linux-target
+    restart: unless-stopped
+    # tini as PID 1 reaps processes of killed SSH sessions.
+    init: true
+    ports:
+      # Only reachable from this Mac, not from the local network.
+      - "127.0.0.1:2222:22"
+    volumes:
+      - linux_target_hostkeys:/etc/ssh/hostkeys
+    configs:
+      # Public key of the Ansible service account (not a secret).
+      - source: ansible_authorized_keys
+        target: /etc/accessops/ansible_authorized_keys
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "sshd"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  accessops-api:
+    build:
+      context: .
+      dockerfile: docker/accessops-api/Dockerfile
+    image: accessops/api:local
+    restart: unless-stopped
+    init: true
+    # No "ports:" on purpose: nothing outside the compose network can reach it.
+    # n8n calls it by name: http://accessops-api:8000
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      RABBITMQ_API_URL: http://rabbitmq:15672
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+      ACCESSOPS_API_TOKEN: ${ACCESSOPS_API_TOKEN:?run python -m accessops api-bootstrap}
+      ACCESSOPS_CREDENTIALS_DIR: /run/accessops/credentials
+      ANSIBLE_INVENTORY: /app/ansible/inventory.docker.ini
+      ANSIBLE_SSH_ARGS: >-
+        -o UserKnownHostsFile=/run/accessops/known_hosts
+        -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o ConnectTimeout=10
+    secrets:
+      # Ansible private key: copied in as a file readable only by the API user.
+      - source: ansible_ssh_key
+        mode: 0400
+        uid: "10001"
+        gid: "10001"
+    volumes:
+      # Only the PUBLIC host key of linux-target (read-only), to pin it in known_hosts.
+      - type: volume
+        source: linux_target_hostkeys
+        target: /etc/accessops/linux-target-host-key.pub
+        read_only: true
+        volume:
+          subpath: ssh_host_ed25519_key.pub
+    tmpfs:
+      # Decoded key and known_hosts live in memory only.
+      - /run/accessops:uid=10001,gid=10001,mode=0700
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      linux-target:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  n8n_data:
+  linux_target_hostkeys:
+
+configs:
+  # Copied into the container by docker compose (no host folder mount needed).
+  # The value is written to .env by: python -m accessops ssh-bootstrap
+  ansible_authorized_keys:
+    content: "${ANSIBLE_AUTHORIZED_KEY:-}"
+
+secrets:
+  # The value comes from .env (written by: python -m accessops api-bootstrap).
+  # Compose copies it into the container as a file: no host folder mount, not in the image.
+  ansible_ssh_key:
+    environment: ANSIBLE_SSH_PRIVATE_KEY_B64
